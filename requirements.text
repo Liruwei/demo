@@ -1,0 +1,7 @@
+credentials
+flask
+requests
+pycrypto
+pyOpenSSL
+cryptography
+certifi
