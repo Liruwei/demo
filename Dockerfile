@@ -1,6 +1,6 @@
 From python:3.7
 
-COPY ./
+COPY . ./app
 
 WORKDIR /app
 
