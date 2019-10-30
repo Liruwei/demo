@@ -1,18 +1,34 @@
+from flask import Flask, request, send_file, jsonify
+from flasgger import Swagger
 from ftplib import FTP
-from pathlib import Path
-from flask import Flask, Response, request, send_from_directory
-from threading import Thread, Event
-from queue import Queue, Empty
 from io import BytesIO
-from credentials import *
-import os
 import base64
+import binascii
+import os
+
+# _ftphost = '0.0.0.0'
+# _ftphost = '118.24.99.49'
+_ftphost = 'localhost'
+_downloadUrl = 'http://192.168.60.38:1314/api/v1/download/'
+_itemsServicesUrl = 'https://liruwei.cn/download-manifest-file'
+
+try:
+    import xml.etree.cElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
+
 
 def encode(val):
-    return base64.b64encode(val.encode('utf-8')).decode('utf-8')
-
+    return binascii.b2a_hex(val.encode()).decode()
 def decode(val):
+    return binascii.a2b_hex(val.encode()).decode()
+
+def base64encode(val):
+    print(val)
+    return base64.b64encode(val.encode('utf-8')).decode('utf-8')
+def base64decode(val):
     return base64.b64decode(val.encode('utf-8')).decode('utf-8')
+
 
 def checkfiledir(ftp,file_name):
     try:
@@ -37,94 +53,181 @@ def readallavailablefiles(ftp, path, cb):
         newPath = path + '/' +line
         if checkfiledir(ftp ,newPath) == 'Dir':
             readallavailablefiles(ftp, newPath, cb)
-        elif checkfilexml(newPath):
+        elif checkfilexml(newPath) and line == 'app.plist':
             cb(newPath)
 
+def existFile(ftp, file):
+    try:
+        filePath = '/{}'.format(file)
+        return ftp.size(filePath) > 0
+    except Exception as e:
+        return False
+
 def connectftp():
-    host = "localhost" 
-    ftp = FTP(host)
-    ftp.login("test", "test")
+    host = _ftphost
+    ftp = FTP()
+    ftp.connect(host=host, port=21, timeout=5)
+    ftp.login(user='anonymous',passwd=' ')
     return ftp
 
 def fetchftp():    
     files = []
     ftp = connectftp()
-    readallavailablefiles(ftp, '', files.append)
+    readallavailablefiles(ftp, '', files.append)    
     res = []
     for file in files:
-        res.append({ 'value': encode(file)})
+        appPlist = AppPlist()
+        ftp.retrbinary('RETR {}'.format(file), appPlist.put)
+        keys = ['appName', 'bundleIdentifier', 'version', 'build','buildDateTime', 'userName', 'ipaPath']
+        item = dict(zip(keys, [appPlist.key(k) for k in keys]))
+
+        if item['build'] is None:
+            item['build'] = '1'
+
+        if 'ipaPath' in item and existFile(ftp, item['ipaPath']):
+            res.append(item)
+
+        for val in res:
+            args = (_itemsServicesUrl, encode(_downloadUrl + base64encode(item['ipaPath'])), encode(item['bundleIdentifier']), encode(item['version']), encode(item['appName']))
+            val['ipaPath'] = '{}?ipa={}&identifier={}&version={}&title={}'.format(*args)
+
     ftp.quit()
     return res
 
 
-
-
 ## Class
 
-class FTPDownloader(object):
-    def __init__(self, ftp, timeout=0.01):
-        self.ftp = ftp
-        self.timeout = timeout
+class AppPlist(object):
+    def __init__(self):
+        self.bytes = None
+    
+    def put(self, data):
+        self.bytes = data
 
-    def getBytes(self, filename):
-        print("getBytes")
-        self.ftp.retrbinary("RETR {}".format(filename) , self.bytes.put)
-        self.bytes.join()   # wait for all blocks in the queue to be marked as processed
-        self.finished.set() # mark streaming as finished
-
-    def sendBytes(self):
-        while not self.finished.is_set():
-            try:
-                yield self.bytes.get(timeout=self.timeout)
-                self.bytes.task_done()
-            except Empty:
-                self.finished.wait(self.timeout)
-        self.worker.join()
-
-    def download(self, filename):
-        self.bytes = Queue()
-        self.finished = Event()
-        self.worker = Thread(target=self.getBytes, args=(filename,))
-        self.worker.start()
-        return self.sendBytes()
-
-
-
+    def key(self, keyStr) -> str:
+        tree = ET.fromstring(self.bytes.decode())
+        root = tree.find('dict')
+        keys = [x.text for x in root.findall('key')]
+        vals = [x.text for x in root.findall('string')]
+        if keyStr in keys:
+            return vals[keys.index(keyStr)]
+        else:
+            return None
 
 
 ## Flask
 
 
 app = Flask(__name__)
-@app.route('/api/v1/app/list')
+swagger = Swagger(app)
+
+
+@app.route('/api/v1/apps')
 def apps():
+    """ IPA列表
+    Fetch ipa list from ftp
+    ---
+    tags: 
+      - FTP
+    parameters:
+      - name: page
+        description: Current page
+        in: query
+        type: string
+        default: 1
+      - name: per_page
+        description: The number of page
+        in: query
+        type: string
+        default: 20
+    definitions:
+      IPAItem:
+        type: object
+        properties:
+          appName:
+            type: string
+            description: Display Name
+          bundleIdentifier:
+            type: string
+            description: Bundle Identifier
+          version:
+            type: string
+            description: Version
+          build:
+            type: string
+            description: Build
+          buildDateTime:
+            type: string
+            description: Build time
+          userName:
+            type: string
+            description: The user who build this app
+          ipaPath:
+            type: string
+            description: Ipa path in ftp
+
+    responses:
+      200:
+        schema: 
+          $ref: '#/definitions/IPAItem'
+        description: The list of ipa in ftp
+        examples:
+          data: [
+            {
+                'appName' : '',
+                'bundleIdentifier' : '',
+                'version' : '',
+                'build' : '',
+                'buildDateTime' : '',
+                'userName' : '',
+                'ipaPath' : ''
+            }
+          ]
+    """
     try:
         data = fetchftp()
+
+        page = request.args.get('page')
+        per_page = request.args.get('per_page')
+        if page is not None and per_page is not None:
+            limit = int(per_page)
+            offset = (int(page) - 1) * limit
+            data = data[ offset : offset+limit ]
+        else:
+            data = data[ 0 : 20 ]
         return {'data' : data, 'code': 200}
     except Exception as e:
         return {'code' : 500, 'msg' : str(e)}
 
-@app.route('/api/v1/app/download/<string:app_path>')
-def app_download(app_path):
+@app.route('/api/v1/download/<string:file_download_path>')
+def appsdownload(file_download_path):
+    """ 下载IPA
+    ---
+    tags:
+      - FTP
+    parameters:
+      - name: file_download_path
+        description: IPA encryption path
+        in: path
+        type: string
+        required: true
+    responses:
+      200:
+        description: Download ipa
+    """
     try:
         ftp = connectftp()
-        filepath = decode(app_path)
-        down = FTPDownloader(ftp)
-        headers = {"Content-Disposition": 'attachment;filename=%s.plist' % (app_path)}
-        return Response(down.download(filepath), mimetype="application/octet-stream", headers=headers)
+        f = BytesIO()
+        ftp.retrbinary('RETR ' + base64decode(file_download_path), f.write)
+        f.seek(0)
+        ftp.quit()
+        return send_file(f, as_attachment=True, attachment_filename='app.ipa')
     except Exception as e:
         return {'code' : 500, 'msg' : str(e)}
 
-@app.route('/api/v1/app')
-def ipa():
-     directory = os.getcwd()
-     headers = {"Content-Disposition": "attachment;filename=jenkind_test.ipa"}
-     return send_from_directory(directory, 'jenkind_test.ipa', as_attachment=True)
-
-
 if __name__ == "__main__":
-
     app.run(host="0.0.0.0", port=1314, debug=True)
+
 
 
 
