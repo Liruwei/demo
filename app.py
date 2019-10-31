@@ -119,7 +119,20 @@ class AppPlist(object):
 
 
 app = Flask(__name__)
-swagger = Swagger(app)
+
+
+template = {
+  "swagger": "2.0",
+  "info": {
+    "title": "My API",
+    "version": "1.0.0"
+  },
+  "host": "192.168.60.38:1314",  # overrides localhost:500
+  "basePath": "/",  # base bash for blueprint registration
+  "operationId": "getmyData"
+}
+
+swagger = Swagger(app, template=template)
 
 
 @app.route('/api/v1/apps')
@@ -224,6 +237,7 @@ def appsdownload(file_download_path):
         return send_file(f, as_attachment=True, attachment_filename='app.ipa')
     except Exception as e:
         return {'code' : 500, 'msg' : str(e)}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=1314, debug=True)
